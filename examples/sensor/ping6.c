@@ -35,10 +35,10 @@
 
 #include "dev/button-sensor.h"
 #include "dev/leds.h"
-#include "debug.h"
+//#include "debug.h"
 
 #define DEBUG DEBUG_PRINT
-#include "net/ip/uip-debug.h"
+#include "net/uip-debug.h"
 
 #define PING6_NB 1
 #define PING6_DATALEN 16

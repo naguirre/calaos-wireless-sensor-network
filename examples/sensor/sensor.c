@@ -2,16 +2,16 @@
 #include "contiki-lib.h"
 #include "contiki-net.h"
 #include "net/rpl/rpl.h"
-#include "net/ip/uip.h"
+#include "net/uip.h"
 
 #include <string.h>
 #include "dev/leds.h"
 #include "dev/button-sensor.h"
-#include "debug.h"
+//#include "debug.h"
 #include "one_wire.h"
 
 #define DEBUG DEBUG_FULL
-#include "net/ip/uip-debug.h"
+#include "net/uip-debug.h"
 
 
 #define SEND_INTERVAL    (8 * CLOCK_SECOND)
