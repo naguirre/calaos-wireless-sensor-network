@@ -19,8 +19,6 @@
 #define IN_DQ()  P2DIR &= ~(1<<0);
 #define GET_DQ() P2_0
 
-
-
 #define DEBUG 1
 
 #if DEBUG
@@ -32,23 +30,12 @@
 #endif /* DEBUG */
 
 
-void init_one_wire(void);
-
-unsigned int read_temperature(void);
-
-void print_registers(void);
-
-void delay_us(uint16_t timeout);
-
-void delay_timer_us(uint16_t timeout);
-
-void reset_One_Wire(void);
-
-void write_One_Wire(uint8_t data);
-
-uint8_t read_One_Wire(void);
-
-uint8_t* readID(void);
-
+void onewire_init(void);
+void onewire_reset(void);
+void onewire_id_get(uint8_t **id);
+uint16_t onewire_temp_read(void);
+void onewire_write(uint8_t data);
+uint8_t onewire_read(void);
+void onewire_id_read(void);
 
 #endif
