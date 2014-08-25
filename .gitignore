@@ -1,0 +1,10 @@
+obj_*
+*.lib
+*.a
+*.map
+*.cc2530dk
+*.hex
+*.lk
+*.mem
+*.banks
+symbols.[ch]
