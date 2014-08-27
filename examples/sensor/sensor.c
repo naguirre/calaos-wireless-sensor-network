@@ -35,16 +35,17 @@ void timer_callback(void){
 
   static char buf[5];
   unsigned int tmp;
+  uint8_t val, frac;
 
-  tmp = read_temperature();
-  buf[0] = ((tmp/100)/10)+48;
-  buf[1] = ((tmp/100)-(((tmp/100)/10)*10)) + 48;
-  buf[2] = ((tmp%100)/10)+48;
-  buf[3] = ((tmp%100)-(((tmp%100)/10)*10)) + 48;
-  buf[4] = '\0';
-  printf("\n\tTemperature:%x%x.%x%x\n",buf[0],buf[1],buf[2],buf[3]);
+  tmp = onewire_temp_read();
+  val = temp / 100;
+  frac = temp % 100;
+  
+  sprintf(buf, "%d.%d", val, frac); 
 
-  //  mqtt_publish(buf);
+  printf("\n\tTemperature:%d.%d\n", val, frac);
+
+  //mqtt_publish(buf);
 
 }
 
@@ -90,7 +91,7 @@ PROCESS_THREAD(mqtt_client_process, ev, data)
  
 
     printf("\nInit One Wire\n");
-    init_one_wire();
+    onewire_init();
 
     // Set the server address
     /* uip_ip6addr(&server_address, */
