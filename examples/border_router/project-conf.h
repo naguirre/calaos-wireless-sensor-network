@@ -1,0 +1,7 @@
+#ifndef PROJECT_CONF_H_
+#define PROJECT_CONF_H_
+
+#define MODELS_CONF_CC2530_ZB500 1
+#define SLIP_ARCH_CONF_ENABLE 1
+
+#endif /* PROJECT_CONF_H_ */
