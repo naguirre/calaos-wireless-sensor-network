@@ -38,8 +38,8 @@ void timer_callback(void){
   uint8_t val, frac;
 
   tmp = onewire_temp_read();
-  val = temp / 100;
-  frac = temp % 100;
+  val = tmp / 100;
+  frac = tmp % 100;
   
   sprintf(buf, "%d.%d", val, frac); 
 
