@@ -24,16 +24,8 @@ AUTOSTART_PROCESSES(&mqtt_client_process);
 PROCESS_THREAD(mqtt_client_process, ev, data)
 {
 
-    static struct etimer sensors_timer;
-    static struct etimer connected_timer;
-    static struct sensors_sensor *sensor;
-
     static uip_ip6addr_t server_address;
 
-
-    static uint8_t id[19];
-    static char topic_name[64];
-    static unsigned char id_ow[19];
 
     PROCESS_BEGIN();
 
@@ -42,19 +34,42 @@ PROCESS_THREAD(mqtt_client_process, ev, data)
                 0xbbbb, 0, 0, 0, 0, 0, 0, 0x001);
 
     /* connect to the broker */
-    mqtt_connect(&server_address, UIP_HTONS(1883), 1);
+    mqtt_connect(&server_address, UIP_HTONS(1883), 10);
 
-    PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
-
-    if (mqtt_connected())
-    {
-        printf("CONNECTED\n");
-    }
 
     while(1)
     {
         PROCESS_WAIT_EVENT();
-        printf("mqtt client event\n");
+        if (ev == mqtt_event)
+        {
+            mqtt_event_data_t *event_data = data; 
+
+            switch(event_data->type)
+            {
+            case MQTT_EVENT_TYPE_CONNECTED:
+                printf("CONNECTED\n");                                
+                mqtt_subscribe("test");
+                break;
+            case MQTT_EVENT_TYPE_DISCONNECTED:
+                printf("DISCONNECTED\n");
+                break;
+            case MQTT_EVENT_TYPE_SUBSCRIBED:
+                printf("SUBSCRIBED\n");               
+                break;
+            case MQTT_EVENT_TYPE_UNSUBSCRIBED:
+                printf("UNSUBSCRIBED\n");
+                break;
+            case MQTT_EVENT_TYPE_PUBLISHED:
+                printf("PUBLISHED\n");
+                break;
+            case MQTT_EVENT_TYPE_PUBLISH:
+                printf("PUBLISH %s\n", event_data->data);
+                break;
+            default:
+                break;
+            }
+        }
+        
     }
 
  

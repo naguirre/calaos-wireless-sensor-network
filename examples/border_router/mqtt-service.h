@@ -57,5 +57,6 @@ extern process_event_t mqtt_event;
 
 void mqtt_connect(uip_ip6addr_t* address, uint16_t port, uint16_t keepalive);
 uint8_t mqtt_connected(void);
+void mqtt_subscribe(const char *topic);
 
 #endif /*  _MQTT_SERVICE_H_ */

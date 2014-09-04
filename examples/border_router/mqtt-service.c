@@ -14,16 +14,20 @@
 #define DEBUG DEBUG_FULL
 #include "net/uip-debug.h"
 
-#define CONNECTION_RETRY_VALUE (1 * CLOCK_SECOND)
-#define MAX_KEEPALIVE_ERROR 6
-
+#define MAX_KEEPALIVE_ERROR 5
 
 typedef enum _mqtt_state_t
 {
     MQTT_STATE_CONNECTION_CLOSED,
     MQTT_STATE_CONNECTION_IN_PROGRESS,
-    MQTT_STATE_CONNECTED
+    MQTT_STATE_CONNECTED,
 }mqtt_state_t;
+
+typedef struct _topic_t {
+    char name[16];
+    uint16_t id;
+}topic_t;
+
 
 typedef struct mqtt_handler_t
 {
@@ -37,10 +41,16 @@ typedef struct mqtt_handler_t
     uint16_t keepalive;
     uint8_t keepalive_error;
     struct process* calling_process;
+    uint8_t pending_msg;
+    topic_t topics[8];
+    uint8_t nb_topics;
+  
 } mqtt_handler_t;
 
 process_event_t mqtt_event;
 static mqtt_handler_t mqtt;
+
+static struct etimer *topiclist;
 
 PROCESS(mqtt_process, "MQTT Process");
 
@@ -62,8 +72,8 @@ static void mqtt_msg_connect_send(mqtt_handler_t *mqtt)
 
 static void mqtt_msg_ping_send(mqtt_handler_t *mqtt, uint8_t type)
 {
-     mqtt->data[0] = 2;
-     mqtt->data[1] = type;
+    mqtt->data[0] = 2;
+    mqtt->data[1] = type;
 }
 
 
@@ -82,9 +92,9 @@ void mqtt_connect(uip_ip6addr_t* address, uint16_t port, uint16_t keepalive)
     mqtt.keepalive = keepalive * CLOCK_SECOND;
     mqtt.keepalive_error = 0;
     mqtt.calling_process = PROCESS_CURRENT();
+    mqtt.nb_topics = 0;
     /* Set connection in progress */
     mqtt.state = MQTT_STATE_CONNECTION_IN_PROGRESS;
-
     process_start(&mqtt_process, (const char*)&mqtt); 
 }
 
@@ -94,6 +104,37 @@ uint8_t mqtt_connected(void)
         return 1;
     else
         return 0;
+}
+
+/* Subscribe to the specified topic */
+void mqtt_subscribe(const char *topic)
+{
+    uint8_t header_size = 5;
+    int i;
+
+    if (mqtt.state != MQTT_STATE_CONNECTED)
+        return;
+
+
+    for (i = 0; i < mqtt.nb_topics; i++)
+    {
+        if (!strcmp(topic, mqtt.topics[i].name))
+        {
+            printf("Topic alread registered with id : %d\n", mqtt.topics[i].id);
+            return;
+        }
+    }
+
+    mqtt.data[0] = (strlen("test") + header_size);
+    mqtt.data[1] = MQTT_MSG_SUBSCRIBE;
+    mqtt.data[2] = 0;
+    mqtt.data[3] = (0 & 0xff00) >> 8;
+    mqtt.data[4] = (0 & 0x00ff);
+    memcpy(mqtt.data + header_size, topic, strlen(topic));
+    mqtt.len = (strlen(topic) + header_size);
+    mqtt.pending_msg = MQTT_MSG_SUBSCRIBE;
+    strcpy(mqtt.topics[mqtt.nb_topics].name, topic);
+    uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);        
 }
 
 static void handle_mqtt_input(char* data)
@@ -114,8 +155,6 @@ static void handle_mqtt_input(char* data)
             
             printf("stop connection timer\n");
             //etimer_stop(&connection_timer);
-
-
             event_data.type = MQTT_EVENT_TYPE_CONNECTED;
             printf("post connect event\n");
             process_post_synch(mqtt.calling_process, mqtt_event, &event_data);
@@ -148,8 +187,56 @@ static void handle_mqtt_input(char* data)
         PRINTF("PINGRESP received\n");
         /* We get an answer to pingreq, reset keepalive error counter */
         mqtt.keepalive_error = 0;
-        /* Reset the ping timer */
         break;   
+    }
+    case MQTT_MSG_SUBACK:
+    {
+        PRINTF("SUBACK received\n");
+        if (mqtt.pending_msg == MQTT_MSG_SUBSCRIBE)
+        {
+            mqtt.topics[mqtt.nb_topics].id = data[3] << 8 | data[4];
+            printf("Topic %s subscribed with id :%d\n", mqtt.topics[mqtt.nb_topics].name, mqtt.topics[mqtt.nb_topics].id);
+            mqtt.nb_topics++;
+        }
+        else
+        {
+            printf("Error : we get suback without subscribe\n");
+        }
+        break;   
+    }
+    case MQTT_MSG_PUBLISH:
+    {
+        int i;
+        uint16_t id = data[3] << 8 | data[4];
+        uint8_t len = data[0] - 7;
+
+        printf("MQTT_MSG_PUBLISH %d\n", id);
+        if (mqtt.state != MQTT_STATE_CONNECTED)
+            return;
+
+        for (i = 0; i < mqtt.nb_topics; i++)
+        {
+            if (mqtt.topics[i].id == id)
+            {
+
+                event_data.type  = MQTT_EVENT_TYPE_PUBLISH;
+                event_data.topic = mqtt.topics[i].name;
+                event_data.data  = data + 7;    
+                mqtt.data[0] = 7;
+                mqtt.data[1] = MQTT_MSG_PUBACK;
+                mqtt.data[2] = data[2];
+                mqtt.data[3] = data[3];
+                mqtt.data[4] = data[4];
+                mqtt.data[5] = data[5];
+                mqtt.data[6] = 0;
+                mqtt.len = 7;
+                uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
+                process_post_synch(mqtt.calling_process, mqtt_event, &event_data);
+                break;
+            }
+        }
+
+        break;
     }
     default:
         PRINTF("UNNOWN MESSAGE %d\n", data[1]);
@@ -198,6 +285,8 @@ PROCESS_THREAD(mqtt_process, ev, data)
     static struct etimer periodic_timer;
 
     PROCESS_BEGIN();
+
+    topiclist = NULL;
 
     while(1)
     {
