@@ -34,7 +34,7 @@ PROCESS_THREAD(mqtt_client_process, ev, data)
                 0xbbbb, 0, 0, 0, 0, 0, 0, 0x001);
 
     /* connect to the broker */
-    mqtt_connect(&server_address, UIP_HTONS(1883), 10);
+    mqtt_connect(&server_address, UIP_HTONS(1883), 1000);
 
 
     while(1)
@@ -48,7 +48,7 @@ PROCESS_THREAD(mqtt_client_process, ev, data)
             {
             case MQTT_EVENT_TYPE_CONNECTED:
                 printf("CONNECTED\n");                                
-                mqtt_subscribe("test");
+                //mqtt_subscribe("test");
                 break;
             case MQTT_EVENT_TYPE_DISCONNECTED:
                 printf("DISCONNECTED\n");
