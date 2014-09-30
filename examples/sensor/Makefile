@@ -1,22 +1,24 @@
 DEFINES+=PROJECT_CONF_H=\"project-conf.h\"
-DEFINES+=CC_CONF_STACK_FRIENDLY=1
+
+
+# We need uIPv6, therefore we also need banking
 HAVE_BANKING=1
 UIP_CONF_IPV6=1
 UIP_CONF_RPL=1
-RF_CHANNEL=26
 
-PROJECT_SOURCEFILES += ping6.c one_wire.c
-
-
-# End of user configuration section
+PROJECT_SOURCEFILES += mqtt-client.c mqtt-service.c one_wire.c
 
 CONTIKI_PROJECT = sensor
 
+#APPS = mqtt-service
+
 all: $(CONTIKI_PROJECT)
 
-CONTIKI = ../../contiki/
+CONTIKI = ../../contiki
+
+
 
 include $(CONTIKI)/Makefile.include
 
 burn:
-	cc-tool -v -e -w $(CONTIKI_PROJECT).hex
+	cc-tool -v -e -f -w $(CONTIKI_PROJECT).hex

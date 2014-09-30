@@ -1,80 +1,62 @@
-/*
- * Copyright (c) 2014, Stephen Robinson
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- *  are met:
- * 
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- * 
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- */
-#ifndef MQTT_SERVICE_H
-#define MQTT_SERVICE_H
+#ifndef _MQTT_SERVICE_H_
+#define _MQTT_SERVICE_H_
 
+enum mqtt_message_type
+{
+    MQTT_MSG_ADVERTISE     = 0x00,
+    MQTT_MSG_SEARCHGW      = 0x01,
+    MQTT_MSG_GWINFO        = 0x02,
+    MQTT_MSG_CONNECT       = 0x04,
+    MQTT_MSG_CONNACK       = 0x05,
+    MQTT_MSG_WILLTOPICREQ  = 0x06,
+    MQTT_MSG_WILLTOPIC     = 0x07,
+    MQTT_MSG_WILLMSGREQ    = 0x08,
+    MQTT_MSG_WILLMSG       = 0x09,
+    MQTT_MSG_REGISTER      = 0x0A,
+    MQTT_MSG_REGACK        = 0x0B,
+    MQTT_MSG_PUBLISH       = 0x0C,
+    MQTT_MSG_PUBACK        = 0x0D,
+    MQTT_MSG_PUBCOMP       = 0x0E,
+    MQTT_MSG_PUBREC        = 0x0F,
+    MQTT_MSG_PUBREL        = 0x10,
+    MQTT_MSG_SUBSCRIBE     = 0x12,
+    MQTT_MSG_SUBACK        = 0x13,
+    MQTT_MSG_UNSUBSCRIBE   = 0x14,
+    MQTT_MSG_UNSUBACK      = 0x15,
+    MQTT_MSG_PINGREQ       = 0x16,
+    MQTT_MSG_PINGRESP      = 0x17,
+    MQTT_MSG_DISCONNECT    = 0x18,
+    MQTT_MSG_WILLTOPICUPD  = 0x1A,
+    MQTT_MSG_WILLTOPICRESP = 0x1B,
+    MQTT_MSG_WILLMSGUPD    = 0x1C,
+    MQTT_MSG_WILLMSGRESP   = 0x1D,
+};
 
-#include "mqtt-msg.h"
-#include "process.h"
-#include "contiki-net.h"
+#define MQTT_EVENT_TYPE_NONE                  0
+#define MQTT_EVENT_TYPE_CONNECTED             1
+#define MQTT_EVENT_TYPE_DISCONNECTED          2
+#define MQTT_EVENT_TYPE_SUBSCRIBED            3
+#define MQTT_EVENT_TYPE_UNSUBSCRIBED          4
+#define MQTT_EVENT_TYPE_PUBLISH               5
+#define MQTT_EVENT_TYPE_PUBLISHED             6
+#define MQTT_EVENT_TYPE_EXITED                7
+#define MQTT_EVENT_TYPE_PUBLISH_CONTINUATION  8
 
+typedef struct mqtt_event_data_t
+{
+  uint8_t type;
+  const char* topic;
+  const char* data;
+  uint16_t topic_length;
+  uint16_t data_length;
+  uint16_t data_offset;
 
-extern int sensors_start;
+} mqtt_event_data_t;
 
+extern process_event_t mqtt_event;
 
-void mqtt_connect(uip_ip6addr_t* address, uint16_t port, 
-		  int auto_reconnect, mqtt_connect_info_t* info, const char* topics[]);
+void mqtt_connect(uip_ip6addr_t* address, uint16_t port, uint16_t keepalive, char *name);
+uint8_t mqtt_connected(void);
+void mqtt_subscribe(const char *topic);
 
-void mqtt_advertise(void);
-
-void mqtt_searchgw(void);
-
-void mqtt_willtopic(char* willtopic);
-
-void mqtt_willmsg(char* willmsg);
-
-void mqtt_register(void);
-
-void mqtt_publish(char* data);
-
-void mqtt_subscribe_name(char* topic);
-
-void mqtt_subscribe_id(uint16_t id);
-
-void mqtt_unsubscribe_name(char* topic);
-
-void mqtt_unsubscribe_id(uint16_t id);
-
-void mqtt_pingreq(char* dest);
-
-void mqtt_pingresp(void);
-
-void mqtt_disconnect(void);
-
-void mqtt_willtopicupd(char* willtopic);
-
-void mqtt_willmsgupd(char* willmsg);
-
-void tcpip_handler(void);
-
-void handle_mqtt_output_udp(void);
-
-#endif
+#endif /*  _MQTT_SERVICE_H_ */

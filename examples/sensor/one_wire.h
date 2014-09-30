@@ -13,26 +13,16 @@
 #include "cc253x.h"
 
 
-#define SET_DQ() P2_0 = 1;	 
-#define CLR_DQ() P2_0 = 0;	
-#define OUT_DQ() P2DIR |= (1<<0); 
+#define SET_DQ() P2_0 = 1;
+#define CLR_DQ() P2_0 = 0;
+#define OUT_DQ() P2DIR |= (1<<0);
 #define IN_DQ()  P2DIR &= ~(1<<0);
 #define GET_DQ() P2_0
 
-#define DEBUG 1
-
-#if DEBUG
-#include <stdio.h>
-#define PRINTF(...) printf(__VA_ARGS__)
-#else /* DEBUG */
-/* We overwrite (read as annihilate) all output functions here */
-#define PRINTF(...)
-#endif /* DEBUG */
-
-
 void onewire_init(void);
 void onewire_reset(void);
-void onewire_id_get(uint8_t **id);
+void onewire_id_get(uint8_t *id);
+void onewire_id_str_get(uint8_t *str);
 uint16_t onewire_temp_read(void);
 void onewire_write(uint8_t data);
 uint8_t onewire_read(void);

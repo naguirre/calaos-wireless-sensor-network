@@ -1,35 +1,5 @@
-/*
- * Copyright (c) 2014, Stephen Robinson
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- *  are met:
- * 
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- * 
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- */
-
 #include "contiki.h"
+#include "contiki-lib.h"
 #include "contiki-net.h"
 #include "sys/etimer.h"
 
@@ -38,499 +8,396 @@
 
 #include "dev/leds.h"
 #include "mqtt-service.h"
+#include "one_wire.h"
 
 #include "debug.h"
 
-#define DEBUG DEBUG_FULL
-#include "net/ip/uip-debug.h"
+#define DEBUG DEBUG_NONE
+#include "net/uip-debug.h"
 
+#define MAX_KEEPALIVE_ERROR 5
 
-
-typedef struct mqtt_state_t
+typedef enum _mqtt_state_t
 {
-  uip_ip6addr_t address;
-  uint16_t port;
-  struct uip_udp_conn* udp_connection;
+    MQTT_STATE_CONNECTION_CLOSED,
+    MQTT_STATE_CONNECTION_IN_PROGRESS,
+    MQTT_STATE_CONNECTED,
+}mqtt_state_t;
 
-  mqtt_connect_info_t* connect_info;
+typedef struct _topic_t {
+    char name[32];
+    uint16_t id;
+}topic_t;
 
-  int pending_msg_type;
-  char* data; //data can be a topic, dest, data ...
-
-  const char* topics[64];
-} mqtt_state_t;
-
-
-
-mqtt_state_t mqtt_state;
-mqtt_message_t message;
-
-int sensors_start = 0;
+static char topic_name[32];
 
 
-/*********************************************************************
-*
-*    Public API
-*
-*********************************************************************/
-
-static print_topics( const char* topics[]){
-  int i = 0;
-  for(i = 0; topics[i] != NULL; i++){
-    printf(" Subscribe to TOPIC: %s\n",topics[i]);
-  }
-}
-
-// Connect to the specified server
-void mqtt_connect(uip_ip6addr_t* address, uint16_t port, int auto_reconnect, mqtt_connect_info_t* info, char* topics[])
+typedef struct mqtt_handler_t
 {
-int i = 0;
+    uip_ip6addr_t address;
+    uint16_t port;
+    struct uip_udp_conn* udp_connection;
+    mqtt_state_t state;
+    uint8_t data[64];
+    uint8_t name[32];
+    uint8_t len;
+    uint8_t con_retry;
+    uint16_t keepalive;
+    uint8_t keepalive_error;
+    struct process* calling_process;
+    uint8_t pending_msg;
+    topic_t topics[8];
+    uint8_t nb_topics;
 
-  // init mqtt_state
-  uip_ipaddr_copy(&mqtt_state.address, address);
-  mqtt_state.port = port;
-  mqtt_state.connect_info = info;
-  mqtt_state.connect_info->buffer = &message;
-  mqtt_state.pending_msg_type = NULL;
-  mqtt_state.data = NULL;
+} mqtt_handler_t;
 
-  for(i = 0; topics[i] != NULL; i++){
-      mqtt_state.topics[i] = topics[i];
-  }
-  print_topics(mqtt_state.topics);
+process_event_t mqtt_event;
+static mqtt_handler_t mqtt;
+static struct etimer *topiclist;
+static char temperature[16];
 
-  // connect to the server
-  printf("mqtt: connecting...\n");
-  mqtt_state.udp_connection = udp_new(&mqtt_state.address, mqtt_state.port, NULL);
-  if ( mqtt_state.udp_connection != NULL) {
-    PRINTF("Created a connection with the server ");
-    PRINT6ADDR(&mqtt_state.udp_connection->ripaddr);
-    PRINTF(" local/remote port %u/%u\n",
-	   UIP_HTONS(mqtt_state.udp_connection->lport), UIP_HTONS(mqtt_state.udp_connection->rport));
-  } else {
-    PRINTF("Could not open connection\n");
-  }
+PROCESS(mqtt_process, "MQTT Process");
 
-  // connect to broker
-  mqtt_msg_connect(mqtt_state.connect_info);
-  uip_udp_packet_send(mqtt_state.udp_connection, mqtt_state.connect_info->buffer->data, mqtt_state.connect_info->buffer->length);
-
-}
-
-
-void mqtt_advertise(void)
+static void mqtt_msg_connect_send(mqtt_handler_t *mqtt)
 {
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_ADVERTISE;
+    uint8_t header_size = 6;
+
+    memset(mqtt->data, 0, sizeof(mqtt->data));
+
+    mqtt->data[0] = (strlen(mqtt->name) + header_size);
+    mqtt->data[1] = MQTT_MSG_CONNECT;
+    mqtt->data[2] = 0;
+    mqtt->data[3] = 1;
+    mqtt->data[4] = ((100) & 0xff00) >> 8;
+    mqtt->data[5] = (100) & 0x00ff;
+    memcpy(mqtt->data + header_size, mqtt->name, strlen(mqtt->name));
+    mqtt->len = (strlen(mqtt->name) + header_size);
 }
 
-void mqtt_searchgw(void)
+static void mqtt_msg_ping_send(mqtt_handler_t *mqtt, uint8_t type)
 {
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SEARCHGW;
+    mqtt->data[0] = 2;
+    mqtt->data[1] = type;
 }
 
 
-void mqtt_willtopic(char* willtopic)
+/* Public API */
+void mqtt_connect(uip_ip6addr_t* address, uint16_t port, uint16_t keepalive, char *name)
 {
-  memcpy(mqtt_state.connect_info->will_topic, willtopic, strlen(willtopic));
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_WILLTOPIC;
+    if(process_is_running(&mqtt_process))
+    {
+        printf("process is already running\n");
+        return;
+    }
+
+    /* Coppy the host address and port */
+    memcpy(&mqtt.address, address, sizeof(uip_ip6addr_t));
+    mqtt.port = port;
+    mqtt.keepalive = keepalive * CLOCK_SECOND;
+    mqtt.keepalive_error = 0;
+    mqtt.calling_process = PROCESS_CURRENT();
+    mqtt.nb_topics = 0;
+    strcpy(mqtt.name, name);
+    /* Set connection in progress */
+    mqtt.state = MQTT_STATE_CONNECTION_IN_PROGRESS;
+    process_start(&mqtt_process, (const char*)&mqtt);
 }
 
-
-void mqtt_willmsg(char* willmsg)
+uint8_t mqtt_connected(void)
 {
-  memcpy(mqtt_state.connect_info->will_message, willmsg, strlen(willmsg));
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_WILLMSG;
+    if (mqtt.state == MQTT_STATE_CONNECTED)
+        return 1;
+    else
+        return 0;
 }
 
-
-
-void mqtt_register(void)
+/* Subscribe to the specified topic */
+void mqtt_subscribe(const char *topic)
 {
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_REGISTER;
+    uint8_t header_size = 5;
+    int i;
+
+    printf("Subscribe : %s\n", topic);
+
+    if (mqtt.state != MQTT_STATE_CONNECTED)
+        return;
+
+
+    for (i = 0; i < mqtt.nb_topics; i++)
+    {
+        if (!strcmp(topic, mqtt.topics[i].name))
+        {
+            printf("Topic alread registered with id : %d\n", mqtt.topics[i].id);
+            return;
+        }
+    }
+
+    printf("Nb topics : %d\n", mqtt.nb_topics);
+
+    mqtt.data[0] = (strlen(topic) + header_size);
+    mqtt.data[1] = MQTT_MSG_SUBSCRIBE;
+    mqtt.data[2] = 0;
+    mqtt.data[3] = (0 & 0xff00) >> 8;
+    mqtt.data[4] = (0 & 0x00ff);
+    memcpy(mqtt.data + header_size, topic, strlen(topic));
+    mqtt.len = (strlen(topic) + header_size);
+    mqtt.pending_msg = MQTT_MSG_SUBSCRIBE;
+    strcpy(mqtt.topics[mqtt.nb_topics].name, topic);
+    printf("Send packet\n");
+    uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
 }
 
-
-
-void mqtt_publish(char* data)
+/* Subscribe to the specified topic */
+void mqtt_msg_publish(const char *topic, const char *data)
 {
-  mqtt_state.data = data;
-  mqtt_msg_publish(mqtt_state.connect_info, data);
-  uip_udp_packet_send(mqtt_state.udp_connection, mqtt_state.connect_info->buffer->data, mqtt_state.connect_info->buffer->length);
+    uint8_t header_size = 7;
+    int i;
+    uint8_t topic_id = 0;
+
+    printf("Publish : %s %s\n", topic, data);
+
+    if (mqtt.state != MQTT_STATE_CONNECTED)
+        return;
+
+
+    for (i = 0; i < mqtt.nb_topics; i++)
+    {
+        if (!strcmp(topic, mqtt.topics[i].name))
+        {
+            topic_id = mqtt.topics[i].id;
+            printf("topic_id found : %d\n", topic_id);
+        }
+    }
+
+    mqtt.data[0] = (strlen(topic) + header_size);
+    mqtt.data[1] = MQTT_MSG_PUBLISH;
+    mqtt.data[2] = 0;
+    mqtt.data[3] = (topic_id & 0xff00) >> 8;
+    mqtt.data[4] = (topic_id & 0x00ff);
+    mqtt.data[5] = 0;
+    mqtt.data[6] = 0;
+    memcpy(mqtt.data + header_size, data, strlen(data));
+    mqtt.len = (strlen(data) + header_size);
+    mqtt.pending_msg = MQTT_MSG_PUBLISH;
+    printf("Send packet topicid : %d\n", topic_id);
+    uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
 }
 
 
-void mqtt_subscribe_name(char* topic)
+static void handle_mqtt_input(char* data)
 {
-  mqtt_state.data = "name";
-  mqtt_state.connect_info->topic_name = topic;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
-}
+    mqtt_event_data_t event_data;
+
+    printf("New data received data [%d] [%d]\n", data[0], data[1]);
+
+    switch(data[1])
+    {
+    case MQTT_MSG_CONNACK:
+    {
+        PRINTF("CONNACK received %d\n", data[2]);
+        switch(data[2])
+        {
+        case 0:
+            mqtt.state = MQTT_STATE_CONNECTED;
+            mqtt.keepalive_error = 0;
+            printf("start keepalive timer\n");
+
+            printf("stop connection timer\n");
+            //etimer_stop(&connection_timer);
+            event_data.type = MQTT_EVENT_TYPE_CONNECTED;
+            printf("post connect event\n");
+            process_post_synch(mqtt.calling_process, mqtt_event, &event_data);
+
+            memset(topic_name, 0, sizeof(topic_name));
+            memcpy(topic_name, "temp/", 5);
+            onewire_id_str_get(topic_name + 5);
+            printf("Topic name : %s\n", topic_name);
+            mqtt_subscribe(topic_name);
+
+            break;
+        case 1:
+            printf("CONNACK:\t Rejected: congestion\n");
+            break;
+        case 2:
+            printf("CONNACK:\t Rejected: invalid topic ID\n");
+            break;
+        case 3:
+            printf("CONNACK:\t Rejected: not supported\n");
+            break;
+        }
+        break;
+    }
+    case MQTT_MSG_PINGREQ:
+    {
+        PRINTF("PINGREQ received\n");
+        /* Send ping response */
+        mqtt_msg_ping_send(&mqtt, MQTT_MSG_PINGRESP);
+        uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
+        /* Reset the ping timer as the conenction is alive */
 
 
-void mqtt_subscribe_id(uint16_t id)
-{
-  mqtt_state.data = "id";
-  mqtt_state.connect_info->topic_id = id;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_SUBSCRIBE;
-}
+        break;
+    }
+    case MQTT_MSG_PINGRESP:
+    {
+        PRINTF("PINGRESP received\n");
+        /* We get an answer to pingreq, reset keepalive error counter */
+        mqtt.keepalive_error = 0;
+        break;
+    }
+    case MQTT_MSG_SUBACK:
+    {
+        PRINTF("SUBACK received\n");
+        if (mqtt.pending_msg == MQTT_MSG_SUBSCRIBE)
+        {
+            mqtt.topics[mqtt.nb_topics].id = data[3] << 8 | data[4];
+            printf("Topic %s subscribed with id :%d\n", mqtt.topics[mqtt.nb_topics].name, mqtt.topics[mqtt.nb_topics].id);
+            mqtt.nb_topics++;
+        }
+        else
+        {
+            printf("Error : we get suback without subscribe\n");
+        }
+        break;
+    }
+    case MQTT_MSG_PUBLISH:
+    {
+        int i;
+        uint16_t id = data[3] << 8 | data[4];
+        uint8_t len = data[0] - 7;
 
+        printf("MQTT_MSG_PUBLISH %d\n", id);
+        if (mqtt.state != MQTT_STATE_CONNECTED)
+            return;
 
-void mqtt_unsubscribe_name(char* topic)
-{
-  mqtt_state.data = "name";
-  mqtt_state.connect_info->topic_name = topic;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-}
+        for (i = 0; i < mqtt.nb_topics; i++)
+        {
+            if (mqtt.topics[i].id == id)
+            {
 
+                event_data.type  = MQTT_EVENT_TYPE_PUBLISH;
+                event_data.topic = mqtt.topics[i].name;
+                event_data.data  = data + 7;
+                mqtt.data[0] = 7;
+                mqtt.data[1] = MQTT_MSG_PUBACK;
+                mqtt.data[2] = data[2];
+                mqtt.data[3] = data[3];
+                mqtt.data[4] = data[4];
+                mqtt.data[5] = data[5];
+                mqtt.data[6] = 0;
+                mqtt.len = 7;
+                uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
+                process_post_synch(mqtt.calling_process, mqtt_event, &event_data);
+                break;
+            }
+        }
 
-void mqtt_unsubscribe_id(uint16_t id)
-{
-  mqtt_state.data = "id";
-  mqtt_state.connect_info->topic_id = id;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_UNSUBSCRIBE;
-}
-
-
-void mqtt_pingreq(char* dest){
-  mqtt_state.data = dest;
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PINGREQ;
-}
-
-
-void mqtt_pingresp(void){
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_PINGRESP;
-}
-
-
-void mqtt_disconnect(void)
-{
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_DISCONNECT;
-}
-
-
-void mqtt_willtopicupd(char* willtopic)
-{
-  memcpy(mqtt_state.connect_info->will_topic, willtopic, strlen(willtopic));
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_WILLTOPICUPD;
-}
-
-
-void mqtt_willmsgupd(char* willmsg)
-{
-  memcpy(mqtt_state.connect_info->will_message, willmsg, strlen(willmsg));
-  mqtt_state.pending_msg_type = MQTT_MSG_TYPE_WILLMSGUPD;
-}
-
-
-static handle_publish_msg(char* data)
-{
-
-  if(strcmp(data + 7, "yellow")){
-      leds_on(LEDS_YELLOW);
-      leds_off(LEDS_RED | LEDS_GREEN);
-  }else if(strcmp(data + 7, "red")){
-      leds_on(LEDS_RED);
-      leds_off(LEDS_YELLOW | LEDS_GREEN);
-  }else if(strcmp(data + 7, "green")){
-      leds_on(LEDS_GREEN);
-      leds_off(LEDS_RED | LEDS_YELLOW);
-  }
-
-
-}
-
-
-static void subscribes_management(void){
-
-    int i = 0;
-
-    for(i = 0; mqtt_state.topics[i] != NULL; i++){
-	mqtt_subscribe_name(mqtt_state.topics[i]);
-	mqtt_msg_subscribe(mqtt_state.connect_info, mqtt_state.data);
-	uip_udp_packet_send(mqtt_state.udp_connection, mqtt_state.connect_info->buffer->data, mqtt_state.connect_info->buffer->length);
-	mqtt_state.pending_msg_type = NULL;
+        break;
+    }
+    default:
+        PRINTF("UNNOWN MESSAGE %d\n", data[1]);
     }
 
 }
 
-
-
-static void handle_mqtt_input_udp(char* data){
-
-
-  switch(data[1]){
-
-
-  case MQTT_MSG_TYPE_GWINFO:
-    mqtt_state.connect_info->gwid = data[2];
-    break;
-
-
-  case MQTT_MSG_TYPE_CONNACK:
-    switch(data[2]){
-    case 0:
-      printf("CONNACK:\t Accepted\n");
-      mqtt_register();
-      break;
-    case 1:
-      printf("CONNACK:\t Rejected: congestion\n");
-      break;
-    case 2:
-      printf("CONNACK:\t Rejected: invalid topic ID\n");
-      break;
-    case 3:
-      printf("CONNACK:\t Rejected: not supported\n");
-      break;
-    }
-    break;
-
-
-  case MQTT_MSG_TYPE_REGACK:
-    // if MsgId is correct and return code is 0
-    if( (((data[4] << 8) | data[5]) == mqtt_state.connect_info->msg_id) && data[6] == 0 ){
-      mqtt_state.connect_info->topic_id = ((data[2] << 8) | data[3]);
-      printf("REGACK:\t OKAY\n");
-      subscribes_management();
-      sensors_start = 1;
-    }
-    else{
-      if( ((data[4] << 8) | data[5]) != mqtt_state.connect_info->msg_id ){
-	  printf("REGACK:\t Wrong MsgId\n");
-      }
-      switch(data[6]){
-      case 1:
-	printf("REGACK:\t Rejected: congestion\n");
-	break;
-      case 2:
-	printf("REGACK:\t Rejected: invalid topic ID\n");
-	break;
-      case 3:
-	printf("REGACK:\t Rejected: not supported\n");
-	break;
-      }
-
-    }
-    break;
-
-
-  case MQTT_MSG_TYPE_PUBLISH:
-    printf("Received data: %s\n",data + 7);
-    handle_publish_msg(data);
-    break;
-
-
-  case MQTT_MSG_TYPE_PUBACK:
-    // if MsgId and topicid are correct and return code is 0
-    if( 
-       (((data[2] << 8) | data[3]) == mqtt_state.connect_info->topic_id) &&
-       (((data[4] << 8) | data[5]) == mqtt_state.connect_info->msg_id) &&
-       data[6] == 0 ){
-      printf("PUBACK:\t OKAY\n");
-    }
-    else{
-      if( ((data[2] << 8) | data[3]) != mqtt_state.connect_info->topic_id ){
-	  printf("PUBACK:\t Wrong TopicId\n");
-      }
-      if( ((data[4] << 8) | data[5]) != mqtt_state.connect_info->msg_id ){
-	  printf("PUBACK:\t Wrong MsgId\n");
-      }
-      switch(data[6]){
-      case 1:
-	printf("PUBACK:\t Rejected: congestion\n");
-	break;
-      case 2:
-	printf("PUBACK:\t Rejected: invalid topic ID\n");
-	break;
-      case 3:
-	printf("PUBACK:\t Rejected: not supported\n");
-	break;
-      }
-
-    }
-    break;
-
-
-  case MQTT_MSG_TYPE_SUBACK:
-    // if MsgId is correct and return code is 0
-    if(	(((data[5] << 8) | data[6]) == mqtt_state.connect_info->msg_id) &&
-	data[7] == 0 ){
-      printf("SUBACK:\t OKAY\n");
-    }
-    else{
-      if( ((data[5] << 8) | data[6]) != mqtt_state.connect_info->msg_id ){
-	  printf("SUBACK:\t Wrong MsgId\n");
-      }
-      switch(data[7]){
-      case 1:
-	printf("SUBACK:\t Rejected: congestion\n");
-	break;
-      case 2:
-	printf("SUBACK:\t Rejected: invalid topic ID\n");
-	break;
-      case 3:
-	printf("SUBACK:\t Rejected: not supported\n");
-	break;
-      }
-
-    }
-    break;
-
-
-  case MQTT_MSG_TYPE_PINGREQ:
-      printf("PINGREQ:\t OKAY");
-    break;
-
-
-  case MQTT_MSG_TYPE_PINGRESP:
-      printf("PINGRESP:\t OKAY");
-    break;
-
-
-  case MQTT_MSG_TYPE_UNSUBACK:
-      printf("UNSUBACK:\t OKAY");
-    break;
-
-
-  case MQTT_MSG_TYPE_DISCONNECT:
-      printf("DISCONNECT:\t OKAY");
-    break;
-
-
-  case MQTT_MSG_TYPE_WILLTOPICREQ:
-      printf("WILLTOPICREQ:\t OKAY");
-    break;
-
-
-  case MQTT_MSG_TYPE_WILLMSGREQ:
-      printf("WILLMSGREQ:\t OKAY");
-    break;
-
-
-  case MQTT_MSG_TYPE_WILLTOPICRESP:
-    switch(data[2]){
-    case 0:
-      printf("WILLTOPICRESP:\t OKAY");
-      break;
-    case 1:
-      printf("WILLTOPICRESP\t Rejected: congestion\n");
-      break;
-    case 2:
-      printf("WILLTOPICRESP\t Rejected: invalid topic ID\n");
-      break;
-    case 3:
-      printf("WILLTOPICRESP\t Rejected: not supported\n");
-      break;
-    }
-    break;
-
-
-  case MQTT_MSG_TYPE_WILLMSGRESP:
-    switch(data[2]){
-    case 0:
-      printf("WILLMSGRESP:\t OKAY");
-      break;
-    case 1:
-      printf("WILLMSGRESP\t Rejected: congestion\n");
-      break;
-    case 2:
-      printf("WILLMSGRESP\t Rejected: invalid topic ID\n");
-      break;
-    case 3:
-      printf("WILLMSGRESP\t Rejected: not supported\n");
-      break;
-    }
-    break;
-
-  }
-
-
-}
-
-
-
-void handle_mqtt_output_udp(void){
-
-
-  if(mqtt_state.pending_msg_type != NULL){
-
-    switch(mqtt_state.pending_msg_type){
-
-    case MQTT_MSG_TYPE_ADVERTISE:
-      mqtt_msg_advertise(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_SEARCHGW:
-      mqtt_msg_searchgw(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_WILLTOPIC:
-      mqtt_msg_willtopic(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_WILLMSG:
-      mqtt_msg_willmsg(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_REGISTER:
-      mqtt_msg_register(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_PUBLISH:
-      mqtt_msg_publish(mqtt_state.connect_info, mqtt_state.data);
-      break;
-
-    case MQTT_MSG_TYPE_SUBSCRIBE:
-      mqtt_msg_subscribe(mqtt_state.connect_info, mqtt_state.data);
-      break;
-
-    case MQTT_MSG_TYPE_UNSUBSCRIBE:
-      mqtt_msg_unsubscribe(mqtt_state.connect_info, mqtt_state.data);
-      break;
-
-    case MQTT_MSG_TYPE_PINGREQ:
-      mqtt_msg_pingreq(mqtt_state.connect_info, mqtt_state.data);
-      break;
-
-    case MQTT_MSG_TYPE_PINGRESP:
-      mqtt_msg_pingresp(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_DISCONNECT:
-      mqtt_msg_disconnect(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_WILLTOPICUPD:
-      mqtt_msg_willtopicupd(mqtt_state.connect_info);
-      break;
-
-    case MQTT_MSG_TYPE_WILLMSGUPD:
-      mqtt_msg_willmsgupd(mqtt_state.connect_info);
-      break;
-
-    }
-
-    uip_udp_packet_send(mqtt_state.udp_connection, mqtt_state.connect_info->buffer->data, mqtt_state.connect_info->buffer->length);
-
-    mqtt_state.pending_msg_type = NULL;
-
-  }
-
-
-}
-
-
-
-void tcpip_handler(void)
+static void periodic_timer_cb(void)
 {
-  char *str;
+    mqtt_event_data_t event_data;
+    uint8_t val, frac;
+    uint16_t temp;
 
-  if(uip_newdata()) {
-    str = uip_appdata;
-    str[uip_datalen()] = '\0';
+    printf("Ping timer %d\n", mqtt.keepalive_error);
 
-    handle_mqtt_input_udp(str);
+    if (mqtt.state != MQTT_STATE_CONNECTED)
+    {
+        /* Not connected : try to reconnect */
+        printf("Try to reconnect\n");
+        mqtt_msg_connect_send(&mqtt);
+        uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
+        return;
+    }
 
-  }
 
+    if (mqtt.keepalive_error >= MAX_KEEPALIVE_ERROR)
+    {
+
+        PRINTF("DISCONNECTED\n");
+        mqtt.state = MQTT_STATE_CONNECTION_IN_PROGRESS;
+        event_data.type = MQTT_EVENT_TYPE_DISCONNECTED;
+        process_post_synch(mqtt.calling_process, mqtt_event, &event_data);
+        return;
+    }
+    else
+    {
+        mqtt.keepalive_error++;
+    }
+
+    temp = onewire_temp_read();
+
+    val = temp / 100;
+    frac = temp % 100;
+    sprintf(temperature, "%d.%d", val, frac);
+    printf("temperature : %s\n", temperature);
+    mqtt_msg_publish(topic_name, temperature);
+
+    mqtt_msg_ping_send(&mqtt, MQTT_MSG_PINGREQ);
+    uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
 }
 
+
+PROCESS_THREAD(mqtt_process, ev, data)
+{
+    char *str;
+    static struct etimer periodic_timer;
+
+    PROCESS_BEGIN();
+
+    topiclist = NULL;
+    onewire_init();
+    while(1)
+    {
+        /* connect to the server */
+        PRINTF("mqtt: connecting...\n");
+        /* Create a new udp connection */
+        mqtt.udp_connection = udp_new(&mqtt.address, mqtt.port, NULL);
+        if (mqtt.udp_connection != NULL)
+        {
+            PRINTF("Created a connection with the server ");
+            PRINT6ADDR(&mqtt.udp_connection->ripaddr);
+            PRINTF(" local/remote port %u/%u\n",
+                   UIP_HTONS(mqtt.udp_connection->lport), UIP_HTONS(mqtt.udp_connection->rport));
+        }
+        else
+        {
+            PRINTF("Could not open connection\n");
+        }
+
+        /* Send a connect message to the broker */
+        mqtt_msg_connect_send(&mqtt);
+        PRINTF("send message CONNECT\n");
+        uip_udp_packet_send(mqtt.udp_connection, mqtt.data, mqtt.len);
+
+        /* Initialize timer for keepalive */
+        printf("Keepalive : %d\n", mqtt.keepalive);
+        etimer_set(&periodic_timer, mqtt.keepalive);
+        /* We are not yet connected so disable keepalive timer for now */
+        //etimer_stop(&ping_timer);
+        while(1)
+        {
+            PROCESS_WAIT_EVENT();
+            if (ev == tcpip_event && uip_newdata())
+            {
+                str = uip_appdata;
+                str[uip_datalen()] = '\0';
+                handle_mqtt_input(str);
+            }
+            else if (ev == PROCESS_EVENT_TIMER && data == &periodic_timer)
+            {
+                printf("PERIODIC\n");
+                periodic_timer_cb();
+                etimer_reset(&periodic_timer);
+            }
+        }
+    }
+    PROCESS_END();
+}
